@@ -173,7 +173,7 @@ Summary: X/7 areas passing
 Critical gaps: <one-line list of the most important missing things, or "none">
 ```
 
-Each item is `OK` or `FAIL`. Section header is `PASS` if all items OK, `FAIL` if any fail, `MISSING` if the file doesn't exist, `N/A` if no GitHub remote was detected.
+Each item is `OK` or `FAIL`. Section header is `PASS` if all items OK, `FAIL` if any fail, `MISSING` if the file doesn't exist, and `N/A` if the check couldn't run at all — no GitHub remote was detected, or, for Labels specifically, no Tooling checkout was available to ask. Always state which.
 
 ### Step 4 — Offer to fix
 
@@ -208,10 +208,11 @@ and PR already carrying it, and the next `sync_labels.py` sweep re-creates the o
 the standard is what's right; change `labels.json` in Tooling, not the repo.
 
 Forbidden labels are the one thing the script won't do for you, precisely because it has no
-delete path. Delete only the names its `forbidden` list actually reported, URL-encoding each:
+delete path. Delete only the names its `forbidden` list actually reported — one call per name,
+taken verbatim from that list (it echoes the repo's own spelling) and URL-encoded, spaces as
+`%20`. Do not type the names from memory; the standard, not this file, decides which they are:
 ```sh
-gh api "repos/{owner}/{repo}/labels/good%20first%20issue" --method DELETE
-gh api "repos/{owner}/{repo}/labels/help%20wanted" --method DELETE
+gh api "repos/{owner}/{repo}/labels/{url-encoded-name-from-forbidden}" --method DELETE
 ```
 Deleting a label strips it from every issue and PR carrying it, so confirm with the user before
 running these, even inside an already-approved fix pass.
