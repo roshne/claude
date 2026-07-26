@@ -71,7 +71,7 @@ If this fails (diverged or no remote), report it and stop. Do not force-pull or 
 ## Step 3 — Read the issue
 
 ```sh
-gh issue view <issue-number> --json number,title,body,labels,assignees,milestone,url
+gh issue view <issue-number> --json number,title,body,labels,assignees,milestone,url,comments
 ```
 
 Display a compact summary:
@@ -81,6 +81,16 @@ Display a compact summary:
 - Body (full text)
 
 If the issue doesn't exist or `gh` errors, report and stop.
+
+Read **every comment** on the issue before doing anything else — comments frequently carry
+critical information that supersedes or refines the original body: scope changes, corrected
+repro steps, decisions from discussion, or an explicit "actually, do X instead." Treat the issue
+body plus its comment thread as a single source of truth, with later comments taking precedence
+over the original body when they conflict.
+
+Summarize any comments that materially affect scope, approach, or acceptance criteria (skip
+comments that are just chatter, +1s, or bot noise). If a comment changes what the work should be,
+call this out explicitly to the user before moving on — this must factor into the plan in Step 5.
 
 ## Step 4 — Create branch
 
