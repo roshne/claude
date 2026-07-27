@@ -33,7 +33,7 @@ Also check for subagent logs in `<session-uuid>/subagents/*.jsonl` — scope tha
 
 **Do NOT `Read` the raw `.jsonl` into context.** Session logs are dominated by deferred-tool and skill-listing attachment blobs on the first several lines — often >100K tokens even for a short 5-turn session — so a raw `Read` burns context on near-zero signal and truncates before it reaches the actual tool events. Parse programmatically instead.
 
-Run the bundled parser, which strips the blob noise and prints the tool timeline, system/hook events, and summed `message.usage` token totals:
+Run the bundled parser, which strips the blob noise and prints the tool timeline, system/hook events, summed `message.usage` token totals, and per-turn context-window occupancy:
 
 ```
 python "<skill-dir>/parse_session.py" "<path-to-session>.jsonl"
@@ -42,11 +42,12 @@ python "<skill-dir>/parse_session.py" "<path-to-session>.jsonl"
 `<skill-dir>` is this skill's own directory (on this machine: `C:\Users\roshn\.claude\skills\analyze-session`). Extend the script if a session needs a field it doesn't yet extract. Only `Read` narrow, known line ranges (`offset`/`limit`) if you must inspect one specific event verbatim.
 
 The parser extracts, per line:
-- **assistant messages** (`type: "assistant"`): `message.content[]` blocks where `type == "tool_use"` — `name`, an `input` summary, and the `message.usage` token counts (plus `thinking`/`text` block sizes)
+- **assistant messages** (`type: "assistant"`): `message.content[]` blocks where `type == "tool_use"` — `name`, an `input` summary, and the `message.usage` token counts (plus `thinking`/`text` block sizes) — plus `ctx`, that turn's context-window occupancy
 - **user messages** (`type: "user"`): when `toolUseResult` is present, the tool result status and content size
 - **system messages** (`type: "system"`): hook summaries, errors, denied tools
+- **context window**: a trailing `=== CONTEXT WINDOW ===` section — peak/final occupancy with the model at peak, `COMPACTION` rows (observed *and* harness-reported pre/post), `CTX_DROP` rows for occupancy loss with no marker, and per-phase context contribution
 
-From that, build a timeline of: `[turn_number, tool_name, input_summary, output_size, tokens_used, status]`.
+From that, build a timeline of: `[turn_number, tool_name, input_summary, output_size, tokens_used, ctx_occupancy, status]`.
 
 Process subagent logs (`<session-uuid>/subagents/*.jsonl`) the same way — run the parser on each — and nest them under their parent tool call.
 
@@ -82,6 +83,14 @@ Check each pattern below. For every finding, record the turn number(s), what hap
 - **Thinking tokens disproportionate**: thinking tokens >3x output tokens on simple tasks. *Caveat*: Claude Code logs do not store replayable thinking text, so per-block thinking size is not recoverable — the parser flags such blocks `redacted (size not logged)` and this check is effectively N/A from a log alone. Extended-thinking cost is already folded into `output_tokens`.
 - **Cache miss patterns**: low `cache_read_input_tokens` relative to `cache_creation_input_tokens` across turns
 
+### Context pressure
+Read these from `=== CONTEXT WINDOW ===`. `ctx` on a TIMELINE row is that turn's occupancy, so the jump between two consecutive `ctx` values attributes the growth to the tool call between them.
+- **Runaway occupancy**: `peak_ctx` against the window of `peak_model` — opus-class runs to ~1M, sonnet/haiku-class to ~200K, and the model can change mid-session, so key the denominator off `peak_model`, never a constant. Past ~80% the session is one large tool result away from compacting.
+- **What filled the window**: find the largest turn-to-turn `ctx` increase and name the tool call on that row. That is the single most expensive thing the session did to its own context, and it is usually the most actionable finding in the report.
+- **Compaction**: a `COMPACTION` row means the session ran out of window and the transcript was rewritten — everything before it was summarized away. `obs_pre`/`obs_post` are what the API saw; `meta_pre`/`meta_post` are the harness's count of the transcript alone and run 2.5–5× lower on the post side. Quote them separately; never average them.
+- **Unexplained drops**: a `CTX_DROP` row is occupancy falling with no compaction marker. It is either silent harness-side context clearing (no log entry at all) or a rewound/edited turn re-branching the conversation (file order is not conversation order). Say which you believe and why — do not report it as a compaction.
+- **`CONTEXT_CONSUMED`** is cumulative context pushed through the window across all phases; with no compaction it equals `final_ctx`.
+
 ### Hook/enforcement failures
 - **Denied tool calls**: tools the user rejected — why, and should the permission config change?
 - **Hook errors**: any hook failures in system messages
@@ -104,7 +113,7 @@ Structure:
 # Session Analysis: <session-id>
 
 **Date**: <timestamp>
-**Turns**: <count> | **Tool calls**: <count> | **Total tokens**: <sum>
+**Turns**: <count> | **Tool calls**: <count> | **Total tokens**: <sum> | **Peak context**: <peak_ctx>
 
 ## Summary
 <2-3 sentence overview of the session's efficiency>
@@ -142,9 +151,15 @@ Structure:
 | Output | | |
 | Input (fresh) | | |
 | **Total** | | |
+
+## Context Window
+**Peak**: <peak_ctx> (<peak_model>, line <peak_line>) | **Final**: <final_ctx> | **Compactions**: <n>
+<what drove the peak — the specific tool call — and any COMPACTION / CTX_DROP events with their line numbers>
 ```
 
 Pull each row straight from the summed `message.usage` fields: `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`, `input_tokens`. A high cache-read share is the cache **working**, not waste — call that out so a big total isn't misread as overspend. Real "fresh" cost = output + input + cache creation.
+
+Fill the Context Window section from `=== CONTEXT WINDOW ===`. Note that `SUM_ALL` is **not** context occupancy — it counts the same cached prefix once per turn and will be an order of magnitude above the window; `peak_ctx` is how full the window actually got. Never present `SUM_ALL` as a context-usage figure.
 
 ## Step 5 — Present to user
 

@@ -10,6 +10,9 @@ events. This script strips that noise and prints:
   2. SYSTEM/EVENTS — hook summaries, errors, denied tools, parse errors.
   3. USAGE TOTALS — summed message.usage fields, plus the real "fresh" cost
      (output + fresh input + cache creation; cache reads are the cache working).
+  4. CONTEXT WINDOW — per-turn context occupancy (peak/final), compaction
+     events with both measurements, unexplained occupancy drops, and the
+     per-phase context contribution.
 
 Notes on the TIMELINE:
   - Claude Code logs each assistant content block as its own JSONL line but
@@ -20,6 +23,29 @@ Notes on the TIMELINE:
   - Thinking blocks show only `chars` when readable text is present; Claude Code
     logs usually store no replayable thinking text, so those rows are flagged
     `redacted (size not logged)` rather than a misleading `chars: 0`.
+
+Notes on CONTEXT WINDOW:
+  - Occupancy is input + cache_read + cache_creation for one message: what the
+    API was asked to hold that turn. output_tokens is excluded — it is
+    generated, not sent. It is also attached to the TIMELINE as `ctx`, on the
+    same row as `out_tokens`, so growth can be blamed on the tool call that
+    caused it.
+  - USAGE TOTALS is NOT occupancy: it counts the same cached prefix once per
+    turn, so SUM_ALL runs far above the window size and says nothing about how
+    full the window got.
+  - Compactions are detected on the system/compact_boundary line (which carries
+    the harness's own compactMetadata) with the isCompactSummary user line as a
+    fallback for older logs. The observed (obs_*) and harness-reported (meta_*)
+    numbers measure different prompts and are reported side by side, never
+    mixed — the phase math uses obs_* only.
+  - Occupancy can also fall with no compaction marker at all (silent
+    harness-side context clearing, or a rewound turn re-branching the
+    conversation). Those show up as CTX_DROP rows rather than being silently
+    charted as a smooth line.
+  - Sidechain (subagent) messages are deliberately not filtered out: main
+    session logs contain none, and filtering them would zero this whole section
+    when the parser is pointed at a subagents/*.jsonl log — which it is meant
+    to be.
 
 Usage:
     python parse_session.py <path-to-session>.jsonl
@@ -54,6 +80,22 @@ usage_tot = {
 seen_msg_ids = set()
 events = []
 
+# Context-window occupancy: how full the window was on each turn, tracked
+# separately from USAGE TOTALS (which counts the same cached prefix once per
+# turn and so says nothing about how full the window actually got).
+ctx_last = 0
+ctx_peak = 0
+ctx_peak_line = 0
+ctx_peak_model = ""
+ctx_msgs = 0
+ctx_phases = []
+ctx_drops = []
+awaiting_post = False
+# Real logs show 20K-250K occupancy drops with no compaction marker at all —
+# silent harness-side context clearing, or a rewound turn re-branching the
+# conversation. 20K is well clear of ordinary turn-to-turn jitter.
+drop_min = 20000
+
 with open(path, "r", encoding="utf-8") as f:
     for lineno, line in enumerate(f, 1):
         line = line.strip()
@@ -74,11 +116,37 @@ with open(path, "r", encoding="utf-8") as f:
             # per-line counting.
             mid = msg.get("id")
             first_of_msg = (mid not in seen_msg_ids) if mid else True
+            ctx = 0
             if first_of_msg:
                 for k in usage_tot:
                     usage_tot[k] += u.get(k, 0) or 0
                 if mid:
                     seen_msg_ids.add(mid)
+                # Occupancy is what the API was asked to hold this turn: fresh
+                # input plus everything read from or written to the cache.
+                # output_tokens is not part of it — it is generated, not sent.
+                # Synthetic entries (API errors, spend-limit notices) carry an
+                # all-zero usage and would punch false floors into the series.
+                if msg.get("model") != "<synthetic>":
+                    ctx = ((u.get("input_tokens", 0) or 0)
+                           + (u.get("cache_read_input_tokens", 0) or 0)
+                           + (u.get("cache_creation_input_tokens", 0) or 0))
+                if ctx > 0:
+                    ctx_msgs += 1
+                    if awaiting_post:
+                        # First real turn after a compaction — its occupancy is
+                        # the post-compaction floor as the API actually saw it.
+                        ctx_phases[-1]["obs_post"] = ctx
+                        awaiting_post = False
+                    elif ctx_last - ctx >= drop_min:
+                        ctx_drops.append({"line": lineno, "kind": "CTX_DROP",
+                                          "from": ctx_last, "to": ctx,
+                                          "drop": ctx_last - ctx})
+                    if ctx > ctx_peak:
+                        ctx_peak = ctx
+                        ctx_peak_line = lineno
+                        ctx_peak_model = msg.get("model") or ""
+                    ctx_last = ctx
             content = msg.get("content", []) or []
             msg_rows = []
             texts = []
@@ -118,8 +186,20 @@ with open(path, "r", encoding="utf-8") as f:
             # the true total (see USAGE TOTALS).
             if msg_rows and first_of_msg:
                 msg_rows[-1]["out_tokens"] = u.get("output_tokens", 0)
+                if ctx:
+                    msg_rows[-1]["ctx"] = ctx
             rows.extend(msg_rows)
         elif t == "user":
+            # Every compaction in current logs writes a system/compact_boundary
+            # line immediately followed by this isCompactSummary user line, so
+            # the boundary — which carries compactMetadata — is the primary
+            # detector and this is only a fallback for older logs that lack it.
+            # awaiting_post is already set when the normal pair fired.
+            if o.get("isCompactSummary") and not awaiting_post:
+                ctx_phases.append({"line": lineno, "kind": "COMPACTION",
+                                   "trigger": "?", "obs_pre": ctx_last,
+                                   "obs_post": 0})
+                awaiting_post = True
             tur = o.get("toolUseResult")
             if tur is not None:
                 msg = o.get("message", {})
@@ -141,6 +221,23 @@ with open(path, "r", encoding="utf-8") as f:
             if isinstance(cont, dict):
                 cont = json.dumps(cont)
             events.append((lineno, "SYSTEM:" + str(sub), str(cont)[:160]))
+            if o.get("subtype") == "compact_boundary":
+                # The boundary carries the harness's own measurement. Keep it
+                # beside the occupancy we observe from message.usage but never
+                # mix the two: meta_post counts only the rewritten transcript,
+                # while the next real request also re-sends the system prompt,
+                # tool schemas and re-injected attachments, so obs_post runs
+                # 2.5-5x higher. The phase math uses the obs_* pair only.
+                cm = o.get("compactMetadata") or {}
+                phase = {"line": lineno, "kind": "COMPACTION",
+                         "trigger": cm.get("trigger") or "?",
+                         "obs_pre": ctx_last, "obs_post": 0}
+                if cm:
+                    phase["meta_pre"] = cm.get("preTokens")
+                    phase["meta_post"] = cm.get("postTokens")
+                    phase["duration_ms"] = cm.get("durationMs")
+                ctx_phases.append(phase)
+                awaiting_post = True
 
 print("=== TIMELINE ===")
 for r in rows:
@@ -154,3 +251,38 @@ tot = sum(usage_tot.values())
 print("SUM_ALL:", tot)
 print("FRESH (out+in+cache_create):",
       usage_tot["output_tokens"] + usage_tot["input_tokens"] + usage_tot["cache_creation_input_tokens"])
+
+# Phase 1 ran from session start to the first compaction, so it contributed its
+# whole pre-compaction occupancy; every later phase only added what it grew on
+# top of the post-compaction floor it inherited. The trailing phase is skipped
+# when the last compaction had no following turn (obs_post stays 0) — there is
+# nothing to subtract from and its context is already counted. Contributions are
+# clamped at 0 because occupancy is not monotonic within a phase (see CTX_DROP),
+# so a raw subtraction can go negative.
+phase_contrib = []
+if ctx_last > 0:
+    if not ctx_phases:
+        phase_contrib.append(ctx_last)
+    else:
+        phase_contrib.append(max(ctx_phases[0]["obs_pre"], 0))
+        for i in range(1, len(ctx_phases)):
+            phase_contrib.append(max(ctx_phases[i]["obs_pre"] - ctx_phases[i - 1]["obs_post"], 0))
+        if ctx_phases[-1]["obs_post"] > 0:
+            phase_contrib.append(max(ctx_last - ctx_phases[-1]["obs_post"], 0))
+
+print("\n=== CONTEXT WINDOW ===")
+print(json.dumps({
+    "messages": ctx_msgs,
+    "peak_ctx": ctx_peak,
+    "peak_line": ctx_peak_line,
+    "peak_model": ctx_peak_model,
+    "final_ctx": ctx_last,
+    "compactions": len(ctx_phases),
+    "unexplained_drops": len(ctx_drops),
+}, indent=2))
+for p in ctx_phases:
+    print(json.dumps(p, ensure_ascii=False))
+for d in ctx_drops:
+    print(json.dumps(d, ensure_ascii=False))
+print("PHASE_CONTRIB:", phase_contrib)
+print("CONTEXT_CONSUMED:", sum(phase_contrib))
