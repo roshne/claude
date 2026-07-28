@@ -97,36 +97,36 @@ Check:
 | REST | `delete_branch_on_merge` | `true` |
 | GraphQL | `usesCustomOpenGraphImage` | `true` |
 
-#### Labels
-
-**This skill holds no label list.** The org-wide issue-label standard is owned by
-`roshne/Tooling` ([Tooling#149](https://github.com/roshne/Tooling/issues/149)) in its
-`labels.json`, and a second copy here is exactly the drift that file exists to prevent.
-Ask the owning script instead — it is read-only in this mode:
-
+Fetch labels:
 ```sh
-python R:/repos/Tooling/sync_labels.py --repo {owner}/{repo} --dry-run --json
+gh api repos/{owner}/{repo}/labels --paginate
 ```
 
-The whole of stdout is one JSON object. Read `results[0]`:
+**Required labels:** `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `ci`, `build`, `style`, `revert`, `priority`, `nice to have`, `wontfix`, `question`, `invalid`, `XS`, `S`, `M`, `L`, `XL`
 
-| Field | Meaning |
+**Effort labels (t-shirt sizes):**
+
+| Label | Meaning |
 |-------|---------|
-| `missing` | standard labels the repo doesn't have |
-| `changed` | labels whose color/description has drifted from the standard |
-| `forbidden` | labels the standard **rejects** that this repo carries, in the repo's own spelling |
-| `ok` / `error` | `false` plus a message if the repo's labels couldn't be read |
+| `XS` | Minor update with no code impact (e.g., docs typo, comment fix) |
+| `S`  | Small, localized change to a single file or function |
+| `M`  | Moderate change spanning a few files within one area |
+| `L`  | Large change across multiple areas or subsystems |
+| `XL` | Project-wide impact (e.g., tooling change, switch to monorepo, major refactor) |
+
+**Forbidden labels:** `good first issue`, `help wanted`
+
+**Legacy labels to rename** (count as present if found, but flag for rename in fix mode):
+
+| Existing name | Rename to |
+|--------------|-----------|
+| `feature` | `feat` |
+| `bug` | `fix` |
+| `documentation` | `docs` |
 
 Check:
-- `missing` is empty
-- `changed` is empty
-- `forbidden` is empty
-
-Report the names verbatim from those lists — do not restate them as a required-label
-checklist, and never assert what the standard *should* contain. If the Tooling checkout
-isn't at `R:\repos\Tooling` (or Python/`gh` fails), report Labels as `N/A` with the reason.
-**Do not** fall back to a hardcoded list: a wrong list is worse than no check, because
-acting on one renames or creates labels that contradict the real standard.
+- All required labels present (legacy names count as satisfying the requirement but are flagged for rename)
+- Neither forbidden label present
 
 ### Step 3 — Produce the report
 
@@ -164,16 +164,16 @@ Audited: <absolute path>
 - FAIL Social preview image (not set)
 
 ### Labels                       [PASS | FAIL | N/A]
-- FAIL Missing: effort: XS, effort: S
-- FAIL Forbidden present: good first issue, help wanted
-- OK   No color/description drift
+- FAIL Missing: perf, ci, style
+- FAIL Forbidden present: good first issue
+- OK   All other required labels present
 
 ---
 Summary: X/7 areas passing
 Critical gaps: <one-line list of the most important missing things, or "none">
 ```
 
-Each item is `OK` or `FAIL`. Section header is `PASS` if all items OK, `FAIL` if any fail, `MISSING` if the file doesn't exist, and `N/A` if the check couldn't run at all — no GitHub remote was detected, or, for Labels specifically, no Tooling checkout was available to ask. Always state which.
+Each item is `OK` or `FAIL`. Section header is `PASS` if all items OK, `FAIL` if any fail, `MISSING` if the file doesn't exist, `N/A` if no GitHub remote was detected.
 
 ### Step 4 — Offer to fix
 
@@ -194,28 +194,44 @@ gh api repos/{owner}/{repo} \
   --field delete_branch_on_merge=true
 ```
 
-**Labels** — re-run the owning script without `--dry-run`. It creates what's missing and aligns
-what drifted, additively: it has no delete path and no rename path, so nothing already tagged on
-an issue is disturbed.
+**Labels** — rename legacy labels first, then create any still missing:
 ```sh
-python R:/repos/Tooling/sync_labels.py --repo {owner}/{repo}
+# Rename legacy labels (preserves existing issues/PRs tagged with them)
+gh api repos/{owner}/{repo}/labels/feature       --method PATCH --field name=feat          --field description="New feature (Conventional Commits: feat)" 2>/dev/null
+gh api repos/{owner}/{repo}/labels/bug           --method PATCH --field name=fix           --field description="Bug fix (Conventional Commits: fix)" 2>/dev/null
+gh api repos/{owner}/{repo}/labels/documentation --method PATCH --field name=docs          --field description="Documentation (Conventional Commits: docs)" 2>/dev/null
+
+# Create missing required labels
+gh label create "feat"         --repo {owner}/{repo} --color 0075ca --description "New feature (Conventional Commits: feat)"         --force
+gh label create "fix"          --repo {owner}/{repo} --color d73a4a --description "Bug fix (Conventional Commits: fix)"               --force
+gh label create "chore"        --repo {owner}/{repo} --color e4e669 --description "Chore (Conventional Commits: chore)"               --force
+gh label create "docs"         --repo {owner}/{repo} --color 0075ca --description "Documentation (Conventional Commits: docs)"        --force
+gh label create "refactor"     --repo {owner}/{repo} --color bfd4f2 --description "Code refactor (Conventional Commits: refactor)"    --force
+gh label create "test"         --repo {owner}/{repo} --color bfd4f2 --description "Tests (Conventional Commits: test)"                --force
+gh label create "perf"         --repo {owner}/{repo} --color bfd4f2 --description "Performance improvement (Conventional Commits: perf)" --force
+gh label create "ci"           --repo {owner}/{repo} --color bfd4f2 --description "CI/CD (Conventional Commits: ci)"                  --force
+gh label create "build"        --repo {owner}/{repo} --color bfd4f2 --description "Build system (Conventional Commits: build)"        --force
+gh label create "style"        --repo {owner}/{repo} --color bfd4f2 --description "Code style (Conventional Commits: style)"          --force
+gh label create "revert"       --repo {owner}/{repo} --color e4e669 --description "Revert (Conventional Commits: revert)"             --force
+gh label create "priority"     --repo {owner}/{repo} --color b60205 --description "High priority"                                     --force
+gh label create "nice to have" --repo {owner}/{repo} --color c5def5 --description "Low priority, would be nice"                      --force
+gh label create "wontfix"      --repo {owner}/{repo} --color ffffff --description "Won't fix"                                         --force
+gh label create "question"     --repo {owner}/{repo} --color d876e3 --description "Further information requested"                     --force
+gh label create "invalid"      --repo {owner}/{repo} --color e4e669 --description "This doesn't seem right"                          --force
+
+# Effort (t-shirt size) labels
+gh label create "XS"           --repo {owner}/{repo} --color c2e0c6 --description "Effort: minor update with no code impact (e.g., docs)" --force
+gh label create "S"            --repo {owner}/{repo} --color a2eeef --description "Effort: small, localized change"                       --force
+gh label create "M"            --repo {owner}/{repo} --color fbca04 --description "Effort: moderate change across a few files"           --force
+gh label create "L"            --repo {owner}/{repo} --color d93f0b --description "Effort: large change across multiple areas"           --force
+gh label create "XL"           --repo {owner}/{repo} --color b60205 --description "Effort: project-wide impact (e.g., tooling, monorepo)" --force
 ```
 
-**Never rename a label as a "fix."** A rename is a `PATCH` that rewrites the label on every issue
-and PR already carrying it, and the next `sync_labels.py` sweep re-creates the original alongside
-— which is how this skill used to leave a repo holding two competing taxonomies
-([Tooling#149](https://github.com/roshne/Tooling/issues/149)). If a repo's label looks "wrong,"
-the standard is what's right; change `labels.json` in Tooling, not the repo.
-
-Forbidden labels are the one thing the script won't do for you, precisely because it has no
-delete path. Delete only the names its `forbidden` list actually reported — one call per name,
-taken verbatim from that list (it echoes the repo's own spelling) and URL-encoded, spaces as
-`%20`. Do not type the names from memory; the standard, not this file, decides which they are:
+Delete forbidden labels:
 ```sh
-gh api "repos/{owner}/{repo}/labels/{url-encoded-name-from-forbidden}" --method DELETE
+gh api repos/{owner}/{repo}/labels/good%20first%20issue --method DELETE 2>/dev/null
+gh api repos/{owner}/{repo}/labels/help%20wanted --method DELETE 2>/dev/null
 ```
-Deleting a label strips it from every issue and PR carrying it, so confirm with the user before
-running these, even inside an already-approved fix pass.
 
 **Manual only:**
 - Social preview — must be uploaded via GitHub Settings → Social preview
@@ -228,5 +244,5 @@ After fixing, re-audit only the changed areas and confirm they now pass.
 - For .gitignore, look at what languages/tools the project actually uses and only flag entries relevant to the project.
 - For CI: if the workflow file has a different name, still check it. If there are multiple workflow files, audit the most likely main CI gate.
 - For Justfile app-type classification: look at whether the project has a start script, server code, or deployment config — if yes, treat it as an app.
-- Labels are the one area with **no** judgment calls: report exactly what `sync_labels.py --repo ... --dry-run --json` returns, and nothing else. Color/description drift *is* reported (as `changed`) and *is* safe to align, because aligning changes no label's name.
+- If a label already exists with the wrong color or description, mark it OK (name match is sufficient) — do not modify unless the user explicitly asks.
 - If the `main` branch doesn't exist, try `master` for branch protection. If neither, skip that check.
