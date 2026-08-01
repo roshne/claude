@@ -78,9 +78,27 @@ Display a compact summary:
 - Issue number and title
 - URL
 - Labels and milestone (if any)
+- Assignees (if any)
 - Body (full text)
 
 If the issue doesn't exist or `gh` errors, report and stop.
+
+### Check the assignee before going any further
+
+If `assignees` names anyone other than the current user, stop and tell the user:
+
+> Issue #<number> is assigned to @<login>. I'm not starting work on an issue assigned to
+> someone else — say so explicitly if you want me to proceed anyway.
+
+Do not continue to the comments, do not plan, and do not create a branch. A collaborator who assigns themselves
+has usually also commented with the shape they intend to build, so starting anyway duplicates
+their effort and competes with a design they may already be coding against.
+
+An **unassigned** issue is fair game. An issue assigned to the current user is fair game.
+Resolve the current user with `gh api user --jq .login` if it is not already known.
+
+This gate applies to *any* issue work reached through this skill — research and planning
+included, not just implementation.
 
 Read **every comment** on the issue before doing anything else — comments frequently carry
 critical information that supersedes or refines the original body: scope changes, corrected
